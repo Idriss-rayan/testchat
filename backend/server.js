@@ -1,3 +1,5 @@
+// backend/server.js
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -18,40 +20,42 @@ const io = socketIo(server, {
 app.use(cors());
 app.use(express.json());
 
-// Configuration MySQL
+// Configuration MySQL via variables d'environnement
 const db = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'rayan2003',
-    database: 'chat'
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    port: process.env.DB_PORT || 3306
 });
 
 db.connect(err => {
-    if (err) throw err;
-    console.log('Connecté à MySQL');
+    if (err) {
+        console.error('❌ Erreur connexion MySQL:', err);
+        process.exit(1); // stoppe le serveur si la DB est inaccessible
+    }
+    console.log('✅ Connecté à MySQL');
 });
 
-const JWT_SECRET = 'votre_secret_jwt';
+// Secret JWT depuis variable d'environnement
+const JWT_SECRET = process.env.JWT_SECRET || 'default_secret';
 
 // Middleware d'authentification
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
-    if (!token) {
-        return res.status(401).json({ error: 'Token requis' });
-    }
+    if (!token) return res.status(401).json({ error: 'Token requis' });
 
     jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) {
-            return res.status(403).json({ error: 'Token invalide' });
-        }
+        if (err) return res.status(403).json({ error: 'Token invalide' });
         req.user = user;
         next();
     });
 };
 
-// Routes d'authentification
+// --- Routes d'authentification ---
+
 app.post('/register', async (req, res) => {
     const { username, email, password } = req.body;
 
@@ -99,7 +103,7 @@ app.post('/login', (req, res) => {
     );
 });
 
-// Route pour récupérer tous les utilisateurs (sauf l'utilisateur connecté)
+// --- Utilisateurs ---
 app.get('/users', authenticateToken, (req, res) => {
     const userId = req.user.userId;
 
@@ -107,20 +111,17 @@ app.get('/users', authenticateToken, (req, res) => {
         'SELECT id, username, email FROM users WHERE id != ?',
         [userId],
         (err, results) => {
-            if (err) {
-                return res.status(500).json({ error: 'Erreur base de données' });
-            }
+            if (err) return res.status(500).json({ error: 'Erreur base de données' });
             res.json(results);
         }
     );
 });
 
-// Route pour créer une nouvelle conversation
+// --- Conversations ---
 app.post('/conversations', authenticateToken, (req, res) => {
     const userId = req.user.userId;
     const { otherUserId } = req.body;
 
-    // Vérifier si une conversation existe déjà entre ces deux utilisateurs
     const checkQuery = `
         SELECT c.id 
         FROM conversations c
@@ -130,31 +131,20 @@ app.post('/conversations', authenticateToken, (req, res) => {
     `;
 
     db.query(checkQuery, [userId, otherUserId], (err, results) => {
-        if (err) {
-            return res.status(500).json({ error: 'Erreur vérification conversation' });
-        }
+        if (err) return res.status(500).json({ error: 'Erreur vérification conversation' });
 
-        // Si une conversation existe déjà, la retourner
-        if (results.length > 0) {
-            return res.json({ conversationId: results[0].id, exists: true });
-        }
+        if (results.length > 0) return res.json({ conversationId: results[0].id, exists: true });
 
-        // Sinon, créer une nouvelle conversation
         db.query('INSERT INTO conversations () VALUES ()', (err, result) => {
-            if (err) {
-                return res.status(500).json({ error: 'Erreur création conversation' });
-            }
+            if (err) return res.status(500).json({ error: 'Erreur création conversation' });
 
             const conversationId = result.insertId;
 
-            // Ajouter les deux participants
             db.query(
                 'INSERT INTO conversation_participants (conversation_id, user_id) VALUES (?, ?), (?, ?)',
                 [conversationId, userId, conversationId, otherUserId],
                 (err) => {
-                    if (err) {
-                        return res.status(500).json({ error: 'Erreur ajout participants' });
-                    }
+                    if (err) return res.status(500).json({ error: 'Erreur ajout participants' });
                     res.json({ conversationId, exists: false });
                 }
             );
@@ -162,7 +152,6 @@ app.post('/conversations', authenticateToken, (req, res) => {
     });
 });
 
-// Routes pour les conversations
 app.get('/conversations', authenticateToken, (req, res) => {
     const userId = req.user.userId;
 
@@ -191,10 +180,7 @@ app.get('/conversations', authenticateToken, (req, res) => {
     `;
 
     db.query(query, [userId, userId], (err, results) => {
-        if (err) {
-            console.error('Erreur base de données:', err);
-            return res.status(500).json({ error: 'Erreur base de données' });
-        }
+        if (err) return res.status(500).json({ error: 'Erreur base de données' });
         res.json(results);
     });
 });
@@ -210,15 +196,13 @@ app.get('/messages/:conversationId', authenticateToken, (req, res) => {
          ORDER BY m.created_at ASC`,
         [conversationId],
         (err, results) => {
-            if (err) {
-                return res.status(500).json({ error: 'Erreur base de données' });
-            }
+            if (err) return res.status(500).json({ error: 'Erreur base de données' });
             res.json(results);
         }
     );
 });
 
-// Socket.io pour les messages en temps réel
+// --- Socket.io ---
 io.on('connection', (socket) => {
     console.log('Utilisateur connecté:', socket.id);
 
@@ -227,19 +211,15 @@ io.on('connection', (socket) => {
         console.log(`Utilisateur rejoint la conversation: ${conversationId}`);
     });
 
-    socket.on('send_message', async (data) => {
+    socket.on('send_message', (data) => {
         const { conversationId, senderId, content } = data;
 
         db.query(
             'INSERT INTO messages (conversation_id, sender_id, content) VALUES (?, ?, ?)',
             [conversationId, senderId, content],
             (err, result) => {
-                if (err) {
-                    console.error('Erreur sauvegarde message:', err);
-                    return;
-                }
+                if (err) return console.error('Erreur sauvegarde message:', err);
 
-                // Récupérer le message complet avec le nom de l'expéditeur
                 db.query(
                     `SELECT m.*, u.username as sender_name 
                      FROM messages m 
@@ -251,13 +231,8 @@ io.on('connection', (socket) => {
 
                         const message = messageResults[0];
 
-                        // Mettre à jour le timestamp de la conversation
-                        db.query(
-                            'UPDATE conversations SET updated_at = NOW() WHERE id = ?',
-                            [conversationId]
-                        );
+                        db.query('UPDATE conversations SET updated_at = NOW() WHERE id = ?', [conversationId]);
 
-                        // Diffuser le message à tous les utilisateurs dans la conversation
                         io.to(conversationId).emit('new_message', message);
                     }
                 );
